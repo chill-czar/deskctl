@@ -1,0 +1,31 @@
+# Binaries
+deskctl
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+
+# Temporary test captures and media
+*.png
+*.jpg
+*.jpeg
+*.mp4
+*.tmp
+*.log
+
+# Local user configuration and runtime state
+.deskctl/
+active_session.json
+STOP
+*.pid
+
+# OS and Editor metadata
+.DS_Store
+.idea/
+.vscode/
