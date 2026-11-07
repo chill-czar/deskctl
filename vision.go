@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"image"
@@ -186,6 +187,7 @@ func doDiff(file1, file2 string, targetScreen string) {
 		"change_percent": math.Round(pct*100) / 100,
 		"changed":        pct > 0.05,
 		"change_bbox":    bbox,
+		"dirty_rect":     bbox,
 	})
 }
 
@@ -227,6 +229,7 @@ func doWaitForChange(targetScreen string, threshold float64, timeoutMs int) {
 				"changed":        true,
 				"change_percent": math.Round(pct*100) / 100,
 				"change_bbox":    bbox,
+				"dirty_rect":     bbox,
 				"elapsed_ms":     time.Since(start).Milliseconds(),
 			})
 			return
@@ -291,14 +294,12 @@ func doColorAtPixel(imgX, imgY int, screenArg string) {
 		outputError(fmt.Sprintf("Coordinate mapping failed: %v", err))
 	}
 
-	tempShot := filepath.Join(deskctlDir, fmt.Sprintf("pixel_%d.png", time.Now().UnixNano()))
-	out, err := exec.Command("maim", "-g", fmt.Sprintf("1x1+%d+%d", screenX, screenY), tempShot).CombinedOutput()
+	out, err := exec.Command("maim", "-g", fmt.Sprintf("1x1+%d+%d", screenX, screenY)).Output()
 	if err != nil {
-		outputError(fmt.Sprintf("Failed to capture pixel: %s (%v)", strings.TrimSpace(string(out)), err))
+		outputError(fmt.Sprintf("Failed to capture pixel: %v", err))
 	}
-	defer os.Remove(tempShot)
 
-	img, err := loadPNG(tempShot)
+	img, err := png.Decode(bytes.NewReader(out))
 	if err != nil {
 		outputError(fmt.Sprintf("Failed to decode pixel image: %v", err))
 	}

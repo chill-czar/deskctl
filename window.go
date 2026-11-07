@@ -10,18 +10,52 @@ import (
 	"time"
 )
 
+type FrameExtents struct {
+	Left   int `json:"left"`
+	Right  int `json:"right"`
+	Top    int `json:"top"`
+	Bottom int `json:"bottom"`
+}
+
 type WindowInfo struct {
-	ID         string `json:"id"`
-	Title      string `json:"title"`
-	Class      string `json:"class"`
-	PID        int    `json:"pid"`
-	X          int    `json:"x"`
-	Y          int    `json:"y"`
-	W          int    `json:"w"`
-	H          int    `json:"h"`
-	ScreenID   int    `json:"screen_id"`
-	ScreenName string `json:"screen_name"`
-	Active     bool   `json:"active"`
+	ID           string        `json:"id"`
+	Title        string        `json:"title"`
+	Class        string        `json:"class"`
+	PID          int           `json:"pid"`
+	X            int           `json:"x"`
+	Y            int           `json:"y"`
+	W            int           `json:"w"`
+	H            int           `json:"h"`
+	ScreenID     int           `json:"screen_id"`
+	ScreenName   string        `json:"screen_name"`
+	Active       bool          `json:"active"`
+	FrameExtents *FrameExtents `json:"frame_extents,omitempty"`
+}
+
+func getWindowFrameExtents(winID string) *FrameExtents {
+	out, err := exec.Command("xprop", "-id", winID, "_NET_FRAME_EXTENTS", "_GTK_FRAME_EXTENTS").Output()
+	if err != nil {
+		return nil
+	}
+	lines := strings.Split(string(out), "\n")
+	for _, l := range lines {
+		if strings.Contains(l, "_NET_FRAME_EXTENTS(CARDINAL) =") || strings.Contains(l, "_GTK_FRAME_EXTENTS(CARDINAL) =") {
+			parts := strings.Split(l, "=")
+			if len(parts) == 2 {
+				nums := strings.Split(strings.TrimSpace(parts[1]), ",")
+				if len(nums) == 4 {
+					left, _ := strconv.Atoi(strings.TrimSpace(nums[0]))
+					right, _ := strconv.Atoi(strings.TrimSpace(nums[1]))
+					top, _ := strconv.Atoi(strings.TrimSpace(nums[2]))
+					bottom, _ := strconv.Atoi(strings.TrimSpace(nums[3]))
+					if left > 0 || right > 0 || top > 0 || bottom > 0 {
+						return &FrameExtents{Left: left, Right: right, Top: top, Bottom: bottom}
+					}
+				}
+			}
+		}
+	}
+	return nil
 }
 
 func getActiveWindowIDHex() string {
@@ -44,6 +78,7 @@ func getActiveWindowInfo() *WindowInfo {
 	}
 	for _, w := range wins {
 		if w.Active {
+			w.FrameExtents = getWindowFrameExtents(w.ID)
 			return &w
 		}
 	}
@@ -152,11 +187,13 @@ func findTargetWindow(idOpt, titleOpt string) (*WindowInfo, error) {
 		return nil, err
 	}
 
+	var matched *WindowInfo
 	if idOpt != "" {
 		norm := normalizeHex(idOpt)
 		for _, w := range wins {
 			if w.ID == norm || strings.EqualFold(w.ID, norm) {
-				return &w, nil
+				matched = &w
+				break
 			}
 		}
 	} else if titleOpt != "" {
@@ -165,23 +202,33 @@ func findTargetWindow(idOpt, titleOpt string) (*WindowInfo, error) {
 		for _, w := range wins {
 			if !strings.Contains(strings.ToLower(w.Class), "-desktop") {
 				if strings.Contains(strings.ToLower(w.Title), q) || strings.Contains(strings.ToLower(w.Class), q) {
-					return &w, nil
+					matched = &w
+					break
 				}
 			}
 		}
-		// Second pass: match any window if no application window matched
-		for _, w := range wins {
-			if strings.Contains(strings.ToLower(w.Title), q) || strings.Contains(strings.ToLower(w.Class), q) {
-				return &w, nil
+		if matched == nil {
+			// Second pass: match any window if no application window matched
+			for _, w := range wins {
+				if strings.Contains(strings.ToLower(w.Title), q) || strings.Contains(strings.ToLower(w.Class), q) {
+					matched = &w
+					break
+				}
 			}
 		}
 	} else {
 		// Use active window
 		for _, w := range wins {
 			if w.Active {
-				return &w, nil
+				matched = &w
+				break
 			}
 		}
+	}
+
+	if matched != nil {
+		matched.FrameExtents = getWindowFrameExtents(matched.ID)
+		return matched, nil
 	}
 	return nil, fmt.Errorf("window not found matching id=%q title=%q", idOpt, titleOpt)
 }
@@ -288,6 +335,12 @@ func doMoveResizeWindow(idOpt, titleOpt string, x, y, w, h int, dryRun bool) {
 		outputError(err.Error())
 	}
 
+	extents := win.FrameExtents
+	if extents == nil {
+		extents = getWindowFrameExtents(win.ID)
+		win.FrameExtents = extents
+	}
+
 	// wmctrl -e <G>,<X>,<Y>,<W>,<H>
 	// -1 retains existing value
 	gravity := 0
@@ -301,11 +354,12 @@ func doMoveResizeWindow(idOpt, titleOpt string, x, y, w, h int, dryRun bool) {
 	}
 
 	outputJSON(map[string]interface{}{
-		"ok":      true,
-		"action":  "move-resize",
-		"window":  win,
-		"params":  map[string]int{"x": x, "y": y, "w": w, "h": h},
-		"dry_run": dryRun,
+		"ok":            true,
+		"action":        "move-resize",
+		"window":        win,
+		"params":        map[string]int{"x": x, "y": y, "w": w, "h": h},
+		"frame_extents": extents,
+		"dry_run":       dryRun,
 	})
 }
 

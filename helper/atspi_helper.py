@@ -6,9 +6,32 @@ trees, coordinate finding, text extraction/manipulation, and element actions.
 """
 
 import sys
+import io
+import os
 import json
+import socket
+import signal
 import argparse
 import pyatspi
+
+INTERACTIVE_ROLES = {
+    "push button", "check box", "radio button", "combo box", "text", "password text",
+    "menu item", "check menu item", "radio menu item", "tab", "tree table", "table cell",
+    "list item", "link", "slider", "spin button", "toggle button", "entry", "page tab"
+}
+
+def is_interactive(node, role, name, states):
+    if role.lower() in INTERACTIVE_ROLES:
+        return True
+    if name and name.strip() and role.lower() not in {"filler", "separator", "panel", "unknown"}:
+        return True
+    try:
+        act = node.queryAction()
+        if act and act.nActions > 0:
+            return True
+    except Exception:
+        pass
+    return False
 
 def clean_states(acc):
     try:
@@ -76,7 +99,7 @@ def find_target_app_or_frames(reg, pid=None, title_substr=None):
                 pass
     return targets
 
-def collect_tree(node, depth, max_depth, max_nodes, collected, role_filter=None, name_filter=None):
+def collect_tree(node, depth, max_depth, max_nodes, collected, role_filter=None, name_filter=None, interactive_only=False):
     if depth > max_depth or len(collected) >= max_nodes or not node:
         return
         
@@ -90,6 +113,8 @@ def collect_tree(node, depth, max_depth, max_nodes, collected, role_filter=None,
         if role_filter and role_filter.lower() not in role.lower():
             matches = False
         if name_filter and name_filter.lower() not in name.lower():
+            matches = False
+        if interactive_only and not is_interactive(node, role, name, states):
             matches = False
             
         if matches:
@@ -113,7 +138,7 @@ def collect_tree(node, depth, max_depth, max_nodes, collected, role_filter=None,
             if len(collected) >= max_nodes:
                 break
             child = node.getChildAtIndex(i)
-            collect_tree(child, depth + 1, max_depth, max_nodes, collected, role_filter, name_filter)
+            collect_tree(child, depth + 1, max_depth, max_nodes, collected, role_filter, name_filter, interactive_only)
     except Exception:
         pass
 
@@ -145,7 +170,8 @@ def cmd_tree(args):
         if len(collected) >= args.max_nodes:
             break
         collect_tree(root, depth=0, max_depth=args.max_depth, max_nodes=args.max_nodes,
-                     collected=collected, role_filter=role_filter)
+                     collected=collected, role_filter=role_filter,
+                     interactive_only=getattr(args, 'interactive_only', False))
         
     print(json.dumps({
         "ok": True,
@@ -382,9 +408,86 @@ def cmd_auth_check(args):
 
     print(json.dumps({"ok": True, "prompts": prompts, "count": len(prompts)}))
 
-def main():
+SOCK_PATH = "/tmp/deskctl-atspi.sock"
+
+def execute_request(args_list, parser):
+    old_stdout = sys.stdout
+    sys.stdout = buffer = io.StringIO()
+    try:
+        args = parser.parse_args(args_list)
+        if args.cmd == "tree":
+            cmd_tree(args)
+        elif args.cmd == "find":
+            cmd_find(args)
+        elif args.cmd == "get-text":
+            cmd_get_text(args)
+        elif args.cmd == "set-text":
+            cmd_set_text(args)
+        elif args.cmd == "actions":
+            cmd_actions(args)
+        elif args.cmd == "auth-check":
+            cmd_auth_check(args)
+        out = buffer.getvalue().strip()
+        if not out:
+            return json.dumps({"ok": False, "error": "No output produced"})
+        return out
+    except SystemExit:
+        return json.dumps({"ok": False, "error": "Invalid argument syntax"})
+    except Exception as e:
+        return json.dumps({"ok": False, "error": str(e)})
+    finally:
+        sys.stdout = old_stdout
+
+def run_socket_server(parser):
+    if os.path.exists(SOCK_PATH):
+        try:
+            os.unlink(SOCK_PATH)
+        except OSError:
+            pass
+
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(SOCK_PATH)
+    server.listen(16)
+
+    def cleanup(signum, frame):
+        try:
+            if os.path.exists(SOCK_PATH):
+                os.unlink(SOCK_PATH)
+        except Exception:
+            pass
+        sys.exit(0)
+
+    signal.signal(signal.SIGTERM, cleanup)
+    signal.signal(signal.SIGINT, cleanup)
+
+    try:
+        _ = pyatspi.Registry.getDesktop(0).name
+    except Exception:
+        pass
+
+    while True:
+        try:
+            conn, _ = server.accept()
+            with conn:
+                data = b""
+                while not data.endswith(b"\n"):
+                    chunk = conn.recv(4096)
+                    if not chunk:
+                        break
+                    data += chunk
+                if not data:
+                    continue
+                req = json.loads(data.decode("utf-8"))
+                cmd_args = req.get("args", [])
+                resp_json = execute_request(cmd_args, parser)
+                conn.sendall(resp_json.encode("utf-8") + b"\n")
+        except Exception:
+            pass
+
+def build_parser():
     parser = argparse.ArgumentParser(description="AT-SPI helper for deskctl")
-    sub = parser.add_subparsers(dest="cmd", required=True)
+    parser.add_argument("--daemon", action="store_true", help="Run as persistent socket server daemon")
+    sub = parser.add_subparsers(dest="cmd")
     
     p_tree = sub.add_parser("tree")
     p_tree.add_argument("--pid", type=int, default=None)
@@ -392,6 +495,7 @@ def main():
     p_tree.add_argument("--filter", type=str, default=None)
     p_tree.add_argument("--max-depth", type=int, default=5)
     p_tree.add_argument("--max-nodes", type=int, default=150)
+    p_tree.add_argument("--interactive-only", action="store_true", default=False)
     
     p_find = sub.add_parser("find")
     p_find.add_argument("query", type=str)
@@ -421,8 +525,19 @@ def main():
     p_act.add_argument("--do-action", type=str, default=None)
     
     p_auth = sub.add_parser("auth-check")
+    return parser
+
+def main():
+    parser = build_parser()
+    if "--daemon" in sys.argv:
+        run_socket_server(parser)
+        return
 
     args = parser.parse_args()
+    if not args.cmd:
+        parser.print_help()
+        sys.exit(1)
+
     if args.cmd == "tree":
         cmd_tree(args)
     elif args.cmd == "find":

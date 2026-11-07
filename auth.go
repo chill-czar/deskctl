@@ -93,8 +93,7 @@ func checkAuthPrompts() (*AuthPromptInfo, error) {
 	}
 
 	// 3. Scan AT-SPI for visible password entry fields
-	helperScript := getHelperPath()
-	out, err := exec.Command("python3", helperScript, "auth-check").Output()
+	out, err := queryATSPIHelper([]string{"auth-check"})
 	if err == nil {
 		var atspiRes struct {
 			OK      bool             `json:"ok"`

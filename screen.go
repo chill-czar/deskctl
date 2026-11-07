@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"image"
@@ -13,6 +14,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/image/draw"
@@ -82,87 +84,151 @@ func getMousePosition() (int, int, error) {
 	return 0, 0, fmt.Errorf("invalid xdotool getmouselocation output: %s", string(out))
 }
 
-// detectScreens queries xrandr at runtime for all connected monitors.
+type ScreensCacheData struct {
+	Screens        []ScreenInfo        `json:"screens"`
+	VirtualDesktop *VirtualDesktopInfo `json:"virtual_desktop"`
+	Timestamp      int64               `json:"timestamp"`
+}
+
+var (
+	cachedScreens    []ScreenInfo
+	cachedVDesk      *VirtualDesktopInfo
+	lastScreenDetect time.Time
+	screenDetectMu   sync.Mutex
+)
+
+func InvalidateScreenCache() {
+	screenDetectMu.Lock()
+	defer screenDetectMu.Unlock()
+	lastScreenDetect = time.Time{}
+	_ = os.Remove(screensCacheFile)
+}
+
+// detectScreens queries xrandr at runtime for all connected monitors with a 3s TTL cache.
 // Never assumes hardcoded screen counts, resolutions, or positive coordinates.
 func detectScreens() ([]ScreenInfo, *VirtualDesktopInfo, error) {
-	out, err := exec.Command("xrandr", "--listmonitors").CombinedOutput()
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to run xrandr --listmonitors: %s (%v)", strings.TrimSpace(string(out)), err)
-	}
-
-	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
-	if len(lines) < 2 {
-		return nil, nil, fmt.Errorf("no monitors reported by xrandr")
-	}
-
-	sysScale := getDisplayScale()
-
-	// Example line:
-	// 0: +*eDP-1-1 1920/344x1080/193+1920+0  eDP-1-1
-	// 1: +HDMI-1-1 1920/344x1080/193+0+0  HDMI-1-1
-	// 1: VIRTUAL-TEST 1024/200x768/150+100+100
-	re := regexp.MustCompile(`^\s*(\d+):\s+([\+\*]+)?(\S+)\s+(\d+)/\d+x(\d+)/\d+([+-]\d+)([+-]\d+)(?:\s+(\S+))?`)
+	screenDetectMu.Lock()
+	defer screenDetectMu.Unlock()
 
 	var screens []ScreenInfo
-	minX, minY := math.MaxInt32, math.MaxInt32
-	maxX, maxY := math.MinInt32, math.MinInt32
+	var vDesk *VirtualDesktopInfo
 
-	for _, line := range lines[1:] {
-		m := re.FindStringSubmatch(line)
-		if len(m) >= 8 {
-			idx, _ := strconv.Atoi(m[1])
-			flags := m[2]
-			shortName := m[3]
-			w, _ := strconv.Atoi(m[4])
-			h, _ := strconv.Atoi(m[5])
-			x, _ := strconv.Atoi(m[6])
-			y, _ := strconv.Atoi(m[7])
-			name := m[8]
-			if name == "" {
-				name = shortName
-			}
-			isPrimary := strings.Contains(flags, "*")
+	now := time.Now().UnixNano()
+	cacheValid := false
 
-			if x < minX {
-				minX = x
+	// 1. Check in-process cache
+	if time.Since(lastScreenDetect) < 3*time.Second && cachedScreens != nil && cachedVDesk != nil {
+		screens = make([]ScreenInfo, len(cachedScreens))
+		copy(screens, cachedScreens)
+		vCopy := *cachedVDesk
+		vDesk = &vCopy
+		cacheValid = true
+	} else if data, err := os.ReadFile(screensCacheFile); err == nil {
+		// 2. Check on-disk cache for cross-CLI process calls (<3s)
+		var c ScreensCacheData
+		if err := json.Unmarshal(data, &c); err == nil && len(c.Screens) > 0 {
+			if now-c.Timestamp < 3*1000*1000*1000 {
+				screens = make([]ScreenInfo, len(c.Screens))
+				copy(screens, c.Screens)
+				vCopy := *c.VirtualDesktop
+				vDesk = &vCopy
+				cachedScreens = screens
+				cachedVDesk = vDesk
+				lastScreenDetect = time.Unix(0, c.Timestamp)
+				cacheValid = true
 			}
-			if y < minY {
-				minY = y
-			}
-			if x+w > maxX {
-				maxX = x + w
-			}
-			if y+h > maxY {
-				maxY = y + h
-			}
-
-			screens = append(screens, ScreenInfo{
-				ID:      idx,
-				Name:    name,
-				X:       x,
-				Y:       y,
-				W:       w,
-				H:       h,
-				Scale:   sysScale,
-				Primary: isPrimary,
-				Active:  false,
-			})
 		}
 	}
 
-	if len(screens) == 0 {
-		return nil, nil, fmt.Errorf("could not parse any monitors from xrandr output")
+	if !cacheValid {
+		out, err := exec.Command("xrandr", "--listmonitors").CombinedOutput()
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to run xrandr --listmonitors: %s (%v)", strings.TrimSpace(string(out)), err)
+		}
+
+		lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+		if len(lines) < 2 {
+			return nil, nil, fmt.Errorf("no monitors reported by xrandr")
+		}
+
+		sysScale := getDisplayScale()
+		re := regexp.MustCompile(`^\s*(\d+):\s+([\+\*]+)?(\S+)\s+(\d+)/\d+x(\d+)/\d+([+-]\d+)([+-]\d+)(?:\s+(\S+))?`)
+
+		minX, minY := math.MaxInt32, math.MaxInt32
+		maxX, maxY := math.MinInt32, math.MinInt32
+
+		for _, line := range lines[1:] {
+			m := re.FindStringSubmatch(line)
+			if len(m) >= 8 {
+				idx, _ := strconv.Atoi(m[1])
+				flags := m[2]
+				shortName := m[3]
+				w, _ := strconv.Atoi(m[4])
+				h, _ := strconv.Atoi(m[5])
+				x, _ := strconv.Atoi(m[6])
+				y, _ := strconv.Atoi(m[7])
+				name := m[8]
+				if name == "" {
+					name = shortName
+				}
+				isPrimary := strings.Contains(flags, "*")
+
+				if x < minX {
+					minX = x
+				}
+				if y < minY {
+					minY = y
+				}
+				if x+w > maxX {
+					maxX = x + w
+				}
+				if y+h > maxY {
+					maxY = y + h
+				}
+
+				screens = append(screens, ScreenInfo{
+					ID:      idx,
+					Name:    name,
+					X:       x,
+					Y:       y,
+					W:       w,
+					H:       h,
+					Scale:   sysScale,
+					Primary: isPrimary,
+					Active:  false,
+				})
+			}
+		}
+
+		if len(screens) == 0 {
+			return nil, nil, fmt.Errorf("could not parse any monitors from xrandr output")
+		}
+
+		vDesk = &VirtualDesktopInfo{
+			X: minX,
+			Y: minY,
+			W: maxX - minX,
+			H: maxY - minY,
+		}
+
+		cachedScreens = screens
+		cachedVDesk = vDesk
+		lastScreenDetect = time.Now()
+
+		cData := ScreensCacheData{
+			Screens:        screens,
+			VirtualDesktop: vDesk,
+			Timestamp:      now,
+		}
+		if cBytes, err := json.Marshal(cData); err == nil {
+			_ = os.WriteFile(screensCacheFile, cBytes, 0644)
+		}
 	}
 
-	vDesk := &VirtualDesktopInfo{
-		X: minX,
-		Y: minY,
-		W: maxX - minX,
-		H: maxY - minY,
+	// Always determine active screen freshly based on cursor position
+	for i := range screens {
+		screens[i].Active = false
 	}
-
-	// Determine active screen based on cursor position or primary monitor.
-	// We avoid querying window list here to prevent mutual recursion with listWindows().
 	activeSet := false
 	curX, curY, err := getMousePosition()
 	if err == nil {
@@ -177,7 +243,6 @@ func detectScreens() ([]ScreenInfo, *VirtualDesktopInfo, error) {
 	}
 
 	if !activeSet && len(screens) > 0 {
-		// Default to primary or first monitor
 		for i := range screens {
 			if screens[i].Primary {
 				screens[i].Active = true
@@ -193,7 +258,10 @@ func detectScreens() ([]ScreenInfo, *VirtualDesktopInfo, error) {
 	return screens, vDesk, nil
 }
 
-func doScreens() {
+func doScreens(refresh bool) {
+	if refresh {
+		InvalidateScreenCache()
+	}
 	screens, vDesk, err := detectScreens()
 	if err != nil {
 		outputError(err.Error())
@@ -392,22 +460,17 @@ func takeScreenshotMulti(target string, maxWidth int, format string, outputPath 
 		maimArgs = append(maimArgs, "-g", fmt.Sprintf("%dx%d+%d+%d", selectedScreen.W, selectedScreen.H, selectedScreen.X, selectedScreen.Y))
 	}
 
-	tempShot := filepath.Join(deskctlDir, fmt.Sprintf("tmp_shot_%d.png", time.Now().UnixNano()))
-	maimArgs = append(maimArgs, tempShot)
+	cmd := exec.Command("maim", maimArgs...)
+	var stdoutBuf bytes.Buffer
+	var stderrBuf bytes.Buffer
+	cmd.Stdout = &stdoutBuf
+	cmd.Stderr = &stderrBuf
 
-	out, err := exec.Command("maim", maimArgs...).CombinedOutput()
-	if err != nil {
-		return nil, fmt.Errorf("maim screenshot capture failed: %s (%w)", strings.TrimSpace(string(out)), err)
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("maim screenshot capture failed: %s (%w)", strings.TrimSpace(stderrBuf.String()), err)
 	}
-	defer os.Remove(tempShot)
 
-	inFile, err := os.Open(tempShot)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open raw screenshot: %w", err)
-	}
-	defer inFile.Close()
-
-	img, err := png.Decode(inFile)
+	img, err := png.Decode(&stdoutBuf)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode captured screenshot: %w", err)
 	}

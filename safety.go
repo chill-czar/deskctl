@@ -22,6 +22,7 @@ var (
 	stateFile         = filepath.Join(deskctlDir, "last_screenshot.json")
 	helperDir         = filepath.Join(deskctlDir, "helper")
 	failureHistoryFile = filepath.Join(deskctlDir, "failure_tracker.json")
+	screensCacheFile   = filepath.Join(deskctlDir, "screens_cache.json")
 )
 
 type FailureTracker struct {

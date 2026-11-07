@@ -225,7 +225,8 @@ func main() {
 	switch cmd {
 	// ==================== SCREEN & VISION ====================
 	case "screens":
-		doScreens()
+		noRefresh, _ := parseBoolFlag(args, "no-refresh")
+		doScreens(!noRefresh)
 
 	case "screenshot":
 		maxWidth, args := parseIntFlag(args, "max-width", 0)
@@ -486,14 +487,38 @@ func main() {
 		idOpt, args := parseWindowIDFlag(args)
 		titleOpt, args := parseStringFlag(args, "title", "")
 		x, args := parseIntFlag(args, "x", -1)
-		y, _ := parseIntFlag(args, "y", -1)
+		y, args := parseIntFlag(args, "y", -1)
+		if x == -1 && len(args) >= 1 {
+			if val, err := strconv.Atoi(args[0]); err == nil {
+				x = val
+				args = args[1:]
+			}
+		}
+		if y == -1 && len(args) >= 1 {
+			if val, err := strconv.Atoi(args[0]); err == nil {
+				y = val
+				args = args[1:]
+			}
+		}
 		doMoveResizeWindow(idOpt, titleOpt, x, y, -1, -1, dryRun)
 
 	case "resize-window":
 		idOpt, args := parseWindowIDFlag(args)
 		titleOpt, args := parseStringFlag(args, "title", "")
 		w, args := parseIntFlag(args, "w", -1)
-		h, _ := parseIntFlag(args, "h", -1)
+		h, args := parseIntFlag(args, "h", -1)
+		if w == -1 && len(args) >= 1 {
+			if val, err := strconv.Atoi(args[0]); err == nil {
+				w = val
+				args = args[1:]
+			}
+		}
+		if h == -1 && len(args) >= 1 {
+			if val, err := strconv.Atoi(args[0]); err == nil {
+				h = val
+				args = args[1:]
+			}
+		}
 		doMoveResizeWindow(idOpt, titleOpt, -1, -1, w, h, dryRun)
 
 	case "move-to-screen":
@@ -548,8 +573,9 @@ func main() {
 		windowID, args := parseStringFlag(args, "window", "")
 		filter, args := parseStringFlag(args, "filter", "")
 		maxDepth, args := parseIntFlag(args, "max-depth", 5)
-		maxNodes, _ := parseIntFlag(args, "max-nodes", 150)
-		doUITree(windowID, filter, maxDepth, maxNodes)
+		maxNodes, args := parseIntFlag(args, "max-nodes", 150)
+		interactiveOnly, _ := parseBoolFlag(args, "interactive-only")
+		doUITree(windowID, filter, maxDepth, maxNodes, interactiveOnly)
 
 	case "find":
 		windowID, args := parseStringFlag(args, "window", "")
@@ -798,7 +824,64 @@ func main() {
 	case "doctor":
 		doDoctor()
 
+	case "completion":
+		shell := "bash"
+		if len(args) > 0 {
+			shell = args[0]
+		}
+		doCompletion(shell)
+
 	default:
 		outputError(fmt.Sprintf("Unknown command: %q. Run 'deskctl --help' for available commands.", cmd))
 	}
+}
+
+func doCompletion(shell string) {
+	if strings.ToLower(shell) != "bash" {
+		outputError(fmt.Sprintf("Unsupported shell '%s'. Supported shells: bash", shell))
+	}
+
+	script := `# deskctl bash completion
+_deskctl_completion() {
+    local cur prev words cword
+    _init_completion -n : || return
+
+    local commands="reset panic stop killswitch help screens screenshot zoom diff wait-for-change wait-for-stable color-at-pixel find-image record-screen ocr find-text click double-click triple-click right-click middle-click move drag drag-path hold-and-release hover mouse-position scroll type key key-hold windows focus close-window minimize maximize move-window resize-window move-to-screen always-on-top workspaces launch wait-for-window wait-for-window-close ui-tree find click-element get-text set-text element-actions clipboard session run notify open file processes volume brightness network battery wait schedule auth-check auth-wait setup-sudo setup-polkit config doctor completion"
+
+    if [ "$cword" -eq 1 ]; then
+        COMPREPLY=( $(compgen -W "${commands}" -- "$cur") )
+        return 0
+    fi
+
+    local subcmd="${words[1]}"
+    case "$subcmd" in
+        screenshot)
+            COMPREPLY=( $(compgen -W "--target --max-width --format --output --screen" -- "$cur") )
+            ;;
+        click|move|hover|double-click|triple-click|right-click|middle-click)
+            COMPREPLY=( $(compgen -W "--screen --dry-run --screenshot-after" -- "$cur") )
+            ;;
+        windows|focus|close-window|minimize|maximize|move-window|resize-window|move-to-screen)
+            COMPREPLY=( $(compgen -W "--id --window --title --dry-run" -- "$cur") )
+            ;;
+        ui-tree)
+            COMPREPLY=( $(compgen -W "--window --id --filter --max-depth --max-nodes --interactive-only" -- "$cur") )
+            ;;
+        find|click-element|get-text|set-text|element-actions)
+            COMPREPLY=( $(compgen -W "--window --id --role --limit" -- "$cur") )
+            ;;
+        diff|wait-for-change)
+            COMPREPLY=( $(compgen -W "--file1 --file2 --screen --threshold --timeout" -- "$cur") )
+            ;;
+        completion)
+            COMPREPLY=( $(compgen -W "bash" -- "$cur") )
+            ;;
+        *)
+            COMPREPLY=( $(compgen -W "--help --dry-run" -- "$cur") )
+            ;;
+    esac
+}
+complete -F _deskctl_completion deskctl
+`
+	fmt.Print(script)
 }

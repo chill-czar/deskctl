@@ -46,19 +46,72 @@ fi
 
 # 3. Install Python helpers
 echo "3. Installing Python helpers..."
+mkdir -p "${DESKCTL_DIR}/helper"
 if [ -d "${REPO_DIR}/helper" ]; then
+    cp -r "${REPO_DIR}/helper/"* "${DESKCTL_DIR}/helper/" 2>/dev/null || true
     cp -r "${REPO_DIR}/helper/"* "${DESKCTL_DIR}/helpers/" 2>/dev/null || true
 fi
 
-# 4. Install Antigravity desktop skill
-echo "4. Installing Antigravity desktop skill to ${SKILLS_DIR}..."
+# 4. Install Systemd Services (Killswitch & AT-SPI resident daemon)
+echo "4. Configuring systemd background services..."
+SYSTEMD_USER_DIR="${HOME}/.config/systemd/user"
+mkdir -p "${SYSTEMD_USER_DIR}"
+
+cat << 'EOF' > "${SYSTEMD_USER_DIR}/deskctl-killswitch.service"
+[Unit]
+Description=deskctl Emergency Kill Switch Daemon (Ctrl+Alt+Escape)
+After=graphical-session.target
+
+[Service]
+Type=simple
+Environment=DISPLAY=:0
+Environment=XAUTHORITY=%h/.Xauthority
+ExecStart=/usr/bin/python3 %h/.gemini/config/skills/desktop/scripts/killswitch-daemon.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target
+EOF
+
+cat << 'EOF' > "${SYSTEMD_USER_DIR}/deskctl-atspi.service"
+[Unit]
+Description=deskctl Persistent AT-SPI Worker Daemon
+After=graphical-session.target
+
+[Service]
+Type=simple
+Environment=DISPLAY=:0
+Environment=XAUTHORITY=%h/.Xauthority
+ExecStart=/usr/bin/python3 %h/.deskctl/helper/atspi_helper.py --daemon
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target
+EOF
+
+if command -v systemctl >/dev/null 2>&1; then
+    systemctl --user daemon-reload || true
+    systemctl --user enable --now deskctl-killswitch.service || true
+    systemctl --user enable --now deskctl-atspi.service || true
+fi
+
+# 5. Install Bash Auto-completion
+echo "5. Installing Bash auto-completion..."
+COMPLETION_DIR="${HOME}/.local/share/bash-completion/completions"
+mkdir -p "${COMPLETION_DIR}"
+"${PREFIX}/deskctl" completion bash > "${COMPLETION_DIR}/deskctl" 2>/dev/null || true
+
+# 6. Install Antigravity desktop skill
+echo "6. Installing Antigravity desktop skill to ${SKILLS_DIR}..."
 if [ -d "${REPO_DIR}/skills/desktop" ]; then
     mkdir -p "${SKILLS_DIR}"
     cp -r "${REPO_DIR}/skills/desktop/"* "${SKILLS_DIR}/"
 fi
 
-# 5. Run diagnostics
-echo "5. Running deskctl doctor..."
+# 7. Run diagnostics
+echo "7. Running deskctl doctor..."
 "${PREFIX}/deskctl" doctor
 
 echo ""

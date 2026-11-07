@@ -1,15 +1,51 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"math"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
+
+const atspiSocketPath = "/tmp/deskctl-atspi.sock"
+
+func queryATSPIHelper(cmdArgs []string) ([]byte, error) {
+	// 1. Attempt fast UNIX socket connection to persistent daemon
+	conn, err := net.DialTimeout("unix", atspiSocketPath, 80*time.Millisecond)
+	if err == nil {
+		defer conn.Close()
+		_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+		req := map[string]interface{}{"args": cmdArgs}
+		reqBytes, err := json.Marshal(req)
+		if err == nil {
+			reqBytes = append(reqBytes, '\n')
+			if _, err := conn.Write(reqBytes); err == nil {
+				reader := bufio.NewReader(conn)
+				line, err := reader.ReadBytes('\n')
+				if err == nil && len(line) > 0 {
+					return bytes.TrimSpace(line), nil
+				}
+			}
+		}
+	}
+
+	// 2. Fallback to direct python3 execution if daemon is unavailable
+	helperScript := getHelperPath()
+	args := append([]string{helperScript}, cmdArgs...)
+	out, err := exec.Command("python3", args...).CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("%s (%v)", strings.TrimSpace(string(out)), err)
+	}
+	return bytes.TrimSpace(out), nil
+}
 
 type BBox struct {
 	X int `json:"x"`
@@ -77,9 +113,8 @@ func resolveWindowPID(windowID string) (int, string, error) {
 	return 0, "", fmt.Errorf("window '%s' not found in window list", windowID)
 }
 
-func doUITree(windowID, filter string, maxDepth, maxNodes int) {
-	helperScript := getHelperPath()
-	args := []string{helperScript, "tree"}
+func doUITree(windowID, filter string, maxDepth, maxNodes int, interactiveOnly bool) {
+	args := []string{"tree"}
 
 	if windowID != "" {
 		pid, title, err := resolveWindowPID(windowID)
@@ -102,11 +137,13 @@ func doUITree(windowID, filter string, maxDepth, maxNodes int) {
 	if maxNodes > 0 {
 		args = append(args, "--max-nodes", strconv.Itoa(maxNodes))
 	}
+	if interactiveOnly {
+		args = append(args, "--interactive-only")
+	}
 
-	cmd := exec.Command("python3", args...)
-	out, err := cmd.CombinedOutput()
+	out, err := queryATSPIHelper(args)
 	if err != nil {
-		outputError(fmt.Sprintf("Failed to query accessibility tree: %s (%v)", strings.TrimSpace(string(out)), err))
+		outputError(fmt.Sprintf("Failed to query accessibility tree: %v", err))
 	}
 
 	var res ATSPIHelperResponse
@@ -135,8 +172,7 @@ func doUITree(windowID, filter string, maxDepth, maxNodes int) {
 }
 
 func doFind(query, windowID, roleFilter string, limit int) []ATSPINode {
-	helperScript := getHelperPath()
-	args := []string{helperScript, "find", query}
+	args := []string{"find", query}
 
 	if windowID != "" {
 		pid, title, err := resolveWindowPID(windowID)
@@ -157,10 +193,9 @@ func doFind(query, windowID, roleFilter string, limit int) []ATSPINode {
 		args = append(args, "--limit", strconv.Itoa(limit))
 	}
 
-	cmd := exec.Command("python3", args...)
-	out, err := cmd.CombinedOutput()
+	out, err := queryATSPIHelper(args)
 	if err != nil {
-		outputError(fmt.Sprintf("Failed to search accessible elements: %s (%v)", strings.TrimSpace(string(out)), err))
+		outputError(fmt.Sprintf("Failed to search accessible elements: %v", err))
 	}
 
 	var res ATSPIHelperResponse
@@ -265,8 +300,7 @@ func doClickElement(name, roleFilter, windowID, button string, double, triple, d
 }
 
 func doSetText(query, text, windowID, roleFilter string) {
-	helperScript := getHelperPath()
-	args := []string{helperScript, "set-text", text}
+	args := []string{"set-text", text}
 	if query != "" {
 		args = append(args, "--query", query)
 	}
@@ -282,9 +316,9 @@ func doSetText(query, text, windowID, roleFilter string) {
 		}
 	}
 
-	out, err := exec.Command("python3", args...).CombinedOutput()
+	out, err := queryATSPIHelper(args)
 	if err != nil {
-		outputError(fmt.Sprintf("set-text failed: %s (%v)", strings.TrimSpace(string(out)), err))
+		outputError(fmt.Sprintf("set-text failed: %v", err))
 	}
 
 	var res map[string]interface{}
@@ -293,8 +327,7 @@ func doSetText(query, text, windowID, roleFilter string) {
 }
 
 func doGetText(query, windowID, roleFilter string) {
-	helperScript := getHelperPath()
-	args := []string{helperScript, "get-text"}
+	args := []string{"get-text"}
 	if query != "" {
 		args = append(args, "--query", query)
 	}
@@ -310,9 +343,9 @@ func doGetText(query, windowID, roleFilter string) {
 		}
 	}
 
-	out, err := exec.Command("python3", args...).CombinedOutput()
+	out, err := queryATSPIHelper(args)
 	if err != nil {
-		outputError(fmt.Sprintf("get-text failed: %s (%v)", strings.TrimSpace(string(out)), err))
+		outputError(fmt.Sprintf("get-text failed: %v", err))
 	}
 
 	var res map[string]interface{}
@@ -321,8 +354,7 @@ func doGetText(query, windowID, roleFilter string) {
 }
 
 func doElementActions(query, windowID, roleFilter, actionName string) {
-	helperScript := getHelperPath()
-	args := []string{helperScript, "actions"}
+	args := []string{"actions"}
 	if query != "" {
 		args = append(args, "--query", query)
 	}
@@ -341,9 +373,9 @@ func doElementActions(query, windowID, roleFilter, actionName string) {
 		}
 	}
 
-	out, err := exec.Command("python3", args...).CombinedOutput()
+	out, err := queryATSPIHelper(args)
 	if err != nil {
-		outputError(fmt.Sprintf("element-actions failed: %s (%v)", strings.TrimSpace(string(out)), err))
+		outputError(fmt.Sprintf("element-actions failed: %v", err))
 	}
 
 	var res map[string]interface{}

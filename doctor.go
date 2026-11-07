@@ -2,10 +2,12 @@ package main
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 type CheckResult struct {
@@ -133,6 +135,22 @@ func doDoctor() {
 			Name:    "killswitch_daemon",
 			Passed:  false,
 			Details: "Not running. Run 'deskctl run-killswitch-daemon' or use scripts/killswitch-daemon.py",
+		})
+	}
+
+	// 6b. AT-SPI Worker Daemon (Socket)
+	if conn, err := net.DialTimeout("unix", "/tmp/deskctl-atspi.sock", 50*time.Millisecond); err == nil {
+		conn.Close()
+		checks = append(checks, CheckResult{
+			Name:    "atspi_worker_daemon",
+			Passed:  true,
+			Details: "Active on /tmp/deskctl-atspi.sock (sub-20ms ultra-low latency enabled)",
+		})
+	} else {
+		checks = append(checks, CheckResult{
+			Name:    "atspi_worker_daemon",
+			Passed:  false,
+			Details: "Inactive (falling back to CLI). Run 'systemctl --user start deskctl-atspi.service'.",
 		})
 	}
 
